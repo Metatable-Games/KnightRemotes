@@ -1,0 +1,4 @@
+std = "roblox"
+
+[lints]
+mixed_table = "allow"

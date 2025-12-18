@@ -1,0 +1,5 @@
+indent_type = "Tabs"
+quote_style = "ForceDouble"
+
+[sort_requires]
+enabled = false
