@@ -28,7 +28,13 @@ export type ServerEventConfig = {
 export type ServerNetworking = {
 	Events: { [string]: EventInfo },
 	Middleware: { Middleware },
-	new: (self: ServerNetworking, RemoteName: string, Reliable: boolean | ServerEventConfig | nil, TwoWay: boolean?, callback: ((...any) -> ())?) -> (),
+	new: (
+		self: ServerNetworking,
+		RemoteName: string,
+		Reliable: boolean | ServerEventConfig | nil,
+		TwoWay: boolean?,
+		callback: ((...any) -> ())?
+	) -> (),
 	Destroy: (self: ServerNetworking, RemoteName: string) -> (),
 	Register: (self: ServerNetworking, Name: string, Type: string, Callback: ((...any) -> ())?) -> any,
 	Disconnect: (self: ServerNetworking, RemoteName: string, ConnectionId: string) -> (),
@@ -49,9 +55,15 @@ export type ServerNetworking = {
 	_flush: (self: ServerNetworking) -> (),
 }
 
-local ServerNetworking = Class():Extend(SharedNetworkingModule)
+local ServerNetworking = Class("ServerNetworking"):Extend(SharedNetworkingModule)
 
-function ServerNetworking:new(RemoteName: string, Reliable: boolean | ServerEventConfig | nil, TwoWay: boolean?, callback: ((...any) -> ())?)
+function ServerNetworking:new(
+	RemoteName: string,
+	Reliable: boolean | ServerEventConfig | nil,
+	TwoWay: boolean?,
+	callback: ((...any) -> ())?
+)
+	RemoteName = self:SanitizeRemoteName(RemoteName)
 	if typeof(Reliable) == "table" then
 		-- > Support passing in a table of options
 		local Config = Reliable :: any
@@ -62,6 +74,7 @@ function ServerNetworking:new(RemoteName: string, Reliable: boolean | ServerEven
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	assert(type(Reliable) == "boolean" or Reliable == nil, "Reliable must be a boolean or nil.")
 	assert(type(TwoWay) == "boolean" or TwoWay == nil, "TwoWay must be a boolean or nil.")
+
 	assert(self.Events[RemoteName] == nil, "RemoteName '" .. RemoteName .. "' is already registered.")
 
 	-- Default to reliable remotes
@@ -107,6 +120,19 @@ end
 
 ServerNetworking.New = ServerNetworking.new
 
+-- :new() Wrappers --
+function ServerNetworking:Reliable(RemoteName: string, callback: ((...any) -> ())?)
+	return self:new(RemoteName, true, false, callback)
+end
+
+function ServerNetworking:TwoWay(RemoteName: string, callback: ((...any) -> ())?)
+	return self:new(RemoteName, true, true, callback)
+end
+
+function ServerNetworking:Unreliable(RemoteName: string, callback: ((...any) -> ())?)
+	return self:new(RemoteName, false, false, callback)
+end
+
 --[[
 	Destroys a remote event and replicates to clients.
 	Clears all callbacks and removes the event from the Events table.
@@ -115,6 +141,7 @@ ServerNetworking.New = ServerNetworking.new
 ]]
 function ServerNetworking:destroy(RemoteName: string)
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
+	RemoteName = self:SanitizeRemoteName(RemoteName)
 
 	if self.Events[RemoteName] == nil then
 		warn("[KnightRemotes]: ", "RemoteName '" .. RemoteName .. "' does not exist.")
@@ -137,7 +164,8 @@ end
 ServerNetworking.Destroy = ServerNetworking.destroy
 
 -- > Backward compatibility with old networking
-function ServerNetworking:register(Name: string, Type: string, Callback: (...any) -> ()?)
+function ServerNetworking:register(RemoteName: string, Type: string, Callback: (...any) -> ()?)
+	RemoteName = self:SanitizeRemoteName(RemoteName)
 	warn("[KnightRemotes]: ", "ServerNetworking:Register(Name, Type, Callback) is deprecated.", debug.traceback())
 
 	if table.find({ "BindableEvent", "BindableFunction" }, Type) then
@@ -147,10 +175,10 @@ function ServerNetworking:register(Name: string, Type: string, Callback: (...any
 	local isUnreliable = Type == "UnreliableRemoteEvent"
 	local isTwoWay = Type == "RemoteFunction"
 
-	self:new(Name, not isUnreliable, isTwoWay)
+	self:new(RemoteName, not isUnreliable, isTwoWay)
 
 	if Callback then
-		return self:Connect(Name, Callback)
+		return self:Connect(RemoteName, Callback)
 	end
 end
 ServerNetworking.Register = ServerNetworking.register
@@ -277,7 +305,7 @@ function ServerNetworking:_flushImmediate(reliable: boolean, player: Player?)
 		-- Flush for specific player
 		local map = if reliable then self.ReliableMap else self.UnreliableMap
 		local writer = map[player]
-		
+
 		if writer then
 			map[player] = nil
 			local remote = if reliable then self._Reliable else self._Unreliable

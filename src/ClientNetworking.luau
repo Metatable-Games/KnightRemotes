@@ -18,7 +18,7 @@ export type Connection = {
 	Disconnect: () -> (),
 }
 
-export type Middleware = (player: Player?, eventName: string, args: {any}) -> (boolean, {any}?)
+export type Middleware = (player: Player?, eventName: string, args: { any }) -> (boolean, { any }?)
 
 export type ClientNetworking = {
 	Events: { [string]: EventInfo },
@@ -28,15 +28,15 @@ export type ClientNetworking = {
 	Fire: (self: ClientNetworking, RemoteName: string, ...any) -> ...any,
 	UseMiddleware: (self: ClientNetworking, middleware: Middleware) -> (),
 	_sendPacket: (self: ClientNetworking, id: string, reliable: boolean, packetType: number, ...any) -> (),
-	_dispatch: (self: ClientNetworking, id: string, args: {any}, argCount: number) -> (),
-	_handleEvent: (self: ClientNetworking, buffer: buffer, instance: {Instance}) -> (),
+	_dispatch: (self: ClientNetworking, id: string, args: { any }, argCount: number) -> (),
+	_handleEvent: (self: ClientNetworking, buffer: buffer, instance: { Instance }) -> (),
 	_flush: (self: ClientNetworking) -> (),
 }
 
-local ClientNetworking = Class():Extend(SharedNetworkingModule)
+local ClientNetworking = Class("ClientNetworking"):Extend(SharedNetworkingModule)
 
 -- Internal --
-function ClientNetworking:_sendPacket(id: string, reliable: boolean, packetType: number, ... : any)
+function ClientNetworking:_sendPacket(id: string, reliable: boolean, packetType: number, ...: any)
 	local writer = self:_Writer(reliable)
 
 	self.Buffers.WriteString(writer, id)
@@ -57,7 +57,7 @@ function ClientNetworking:_dispatch(id: string, args: { any }, argCount: number)
 
 	-- Run middleware (client doesn't have player context, so pass nil)
 	for _, middleware in ipairs(self.Middleware) do
-		local shouldContinue, modifiedArgs = middleware(nil, id, {table.unpack(args, 2, argCount)})
+		local shouldContinue, modifiedArgs = middleware(nil, id, { table.unpack(args, 2, argCount) })
 		if not shouldContinue then
 			return -- Middleware blocked the request
 		end
@@ -77,8 +77,8 @@ function ClientNetworking:_dispatch(id: string, args: { any }, argCount: number)
 			task.spawn(callback, table.unpack(args, 2, argCount))
 		end
 	elseif packetType == self.PacketTypes.PACKET_RESPONSE then
-        local reqId = args[2];
-		local ok = args[3];
+		local reqId = args[2]
+		local ok = args[3]
 
 		if type(ok) == "boolean" and ok == true or type(ok) == "number" and ok == 1 then
 			ok = true
@@ -86,15 +86,18 @@ function ClientNetworking:_dispatch(id: string, args: { any }, argCount: number)
 			ok = false
 		end
 
-		local channel = self.Requests[id] and self.Requests[id][reqId];
+		local channel = self.Requests[id] and self.Requests[id][reqId]
 		if not channel then
-			warn("[KnightRemotes]: ", `Received response for unknown request '{id}' with request ID '{reqId}'. Dropping packet.`)
+			warn(
+				"[KnightRemotes]: ",
+				`Received response for unknown request '{id}' with request ID '{reqId}'. Dropping packet.`
+			)
 			return
 		end
 
-		self.Requests[id][reqId] = nil;
-		task.cancel(channel.timer);
-		task.spawn(channel.thread, ok, table.unpack(args, 4, argCount));
+		self.Requests[id][reqId] = nil
+		task.cancel(channel.timer)
+		task.spawn(channel.thread, ok, table.unpack(args, 4, argCount))
 	elseif packetType == self.PacketTypes.PACKET_REQUEST then
 		-- Handle request from server for server->client two-way requests
 		local reqId = args[2]
@@ -155,7 +158,7 @@ end
 function ClientNetworking:_flushImmediate(reliable: boolean, player: Player?)
 	local map = if reliable then self.ReliableMap else self.UnreliableMap
 	local writer = map["_server"]
-	
+
 	if writer then
 		map["_server"] = nil
 		local remote = if reliable then self._Reliable else self._Unreliable

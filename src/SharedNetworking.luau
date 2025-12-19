@@ -42,6 +42,11 @@ SharedNetworking.wasInited = false
 SharedNetworking.Events = {}
 SharedNetworking.Middleware = {}
 SharedNetworking.Buffers = require("./Buffers")
+SharedNetworking.Standalone = true
+
+function SharedNetworking:SanitizeRemoteName(name: string): string
+	return name:gsub(":", "_")
+end
 
 --[[
 	Adds middleware to the networking layer.
@@ -51,7 +56,7 @@ SharedNetworking.Buffers = require("./Buffers")
 ]]
 function SharedNetworking:UseMiddleware(middleware: (Player?, string, { any }) -> (boolean, { any }?)): Connection
 	assert(type(middleware) == "function", "Middleware must be a function")
-		
+
 	table.insert(self.Middleware, middleware)
 
 	return {
@@ -69,6 +74,7 @@ end
 function SharedNetworking:Disconnect(RemoteName: string, ConnectionId: string)
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	assert(type(ConnectionId) == "string", "id must be a string.")
+	RemoteName = self:SanitizeRemoteName(RemoteName)
 	assert(self.Events[RemoteName] ~= nil, "RemoteName '" .. RemoteName .. "' is not registered.")
 
 	if self.Events[RemoteName].Callbacks[ConnectionId] == nil then
@@ -93,9 +99,23 @@ local function waitForEventReplication(self: any, RemoteName: string): EventInfo
 	return self.Events[RemoteName]
 end
 
+function SharedNetworking:IsRegistered(RemoteName: string, yield: boolean?): boolean
+	assert(type(RemoteName) == "string", "RemoteName must be a string.")
+	if yield == nil then
+		yield = false
+	end
+	RemoteName = self:SanitizeRemoteName(RemoteName)
+	if yield and RunService:IsClient() then
+		waitForEventReplication(self, RemoteName)
+	end
+	return self.Events[RemoteName] ~= nil
+end
+SharedNetworking.isRegistered = SharedNetworking.IsRegistered
+
 function SharedNetworking:Connect(RemoteName: string, Callback: (...any) -> ()?)
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	assert(type(Callback) == "function", "Callback must be a function.")
+	RemoteName = self:SanitizeRemoteName(RemoteName)
 
 	local Event = self.Events[RemoteName]
 
@@ -143,8 +163,9 @@ end
 
 function SharedNetworking:Fire(RemoteName: string, ...)
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
-	local args = { ... }
+	RemoteName = self:SanitizeRemoteName(RemoteName)
 
+	local args = { ... }
 	local Event = self.Events[RemoteName]
 
 	-- On the client, wait for event replication if it doesn't exist yet
@@ -256,6 +277,7 @@ end
 function SharedNetworking:FireAll(RemoteName: string, ...)
 	assert(RunService:IsServer(), "FireAll can only be called from the server.")
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
+	RemoteName = self:SanitizeRemoteName(RemoteName)
 
 	if not self.Events[RemoteName] then
 		warn("[KnightRemotes]: ", "RemoteName '" .. RemoteName .. "' is not registered.")
