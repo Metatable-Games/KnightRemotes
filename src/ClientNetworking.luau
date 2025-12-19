@@ -36,6 +36,16 @@ export type ClientNetworking = {
 local ClientNetworking = Class("ClientNetworking"):Extend(SharedNetworkingModule)
 
 -- Internal --
+--[[
+	Internal method to write a packet to the buffer for sending to server.
+	Handles serialization of event ID, packet type, and arguments.
+	
+	@private
+	@param id - The remote event identifier
+	@param reliable - Whether to use reliable transmission
+	@param packetType - Type of packet (EVENT, REQUEST, or RESPONSE)
+	@param ... - Arguments to serialize into the packet
+]]
 function ClientNetworking:_sendPacket(id: string, reliable: boolean, packetType: number, ...: any)
 	local writer = self:_Writer(reliable)
 
@@ -49,6 +59,15 @@ function ClientNetworking:_sendPacket(id: string, reliable: boolean, packetType:
 	end
 end
 
+--[[
+	Internal method to dispatch received packets from server to registered callbacks.
+	Runs middleware, validates events, and handles EVENT/REQUEST/RESPONSE packet types.
+	
+	@private
+	@param id - The remote event identifier
+	@param args - Array of deserialized arguments (first element is packet type)
+	@param argCount - Number of arguments in the array
+]]
 function ClientNetworking:_dispatch(id: string, args: { any }, argCount: number)
 	if self.Events[id] == nil then
 		warn("[KnightRemotes]: ", "Server is attempting to call an unregistered event '" .. id .. "'. Dropping packet.")
@@ -136,6 +155,14 @@ function ClientNetworking:_dispatch(id: string, args: { any }, argCount: number)
 	end
 end
 
+--[[
+	Internal method to handle incoming network packets from server.
+	Deserializes the buffer and dispatches each event to _dispatch.
+	
+	@private
+	@param buffer - The raw buffer data
+	@param instance - Array of instance references for deserialization
+]]
 function ClientNetworking:_handleEvent(buffer, instance: { Instance })
 	local reader = self.Buffers.CreateReader(buffer, instance)
 
@@ -155,6 +182,14 @@ function ClientNetworking:_handleEvent(buffer, instance: { Instance })
 	self.Buffers.FreeReader(reader)
 end
 
+--[[
+	Internal method to immediately flush buffered packets to server.
+	Used for time-sensitive operations like TwoWay requests.
+	
+	@private
+	@param reliable - Whether to flush reliable or unreliable buffer
+	@param player - Unused on client (kept for API compatibility)
+]]
 function ClientNetworking:_flushImmediate(reliable: boolean, player: Player?)
 	local map = if reliable then self.ReliableMap else self.UnreliableMap
 	local writer = map["_server"]
@@ -167,6 +202,12 @@ function ClientNetworking:_flushImmediate(reliable: boolean, player: Player?)
 	end
 end
 
+--[[
+	Internal method to flush all buffered packets to server on the next frame.
+	Called automatically by the Heartbeat loop to batch network operations.
+	
+	@private
+]]
 function ClientNetworking:_flush()
 	local reliableWriter = self.ReliableMap["_server"]
 	if reliableWriter then

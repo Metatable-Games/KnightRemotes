@@ -1,6 +1,7 @@
 --!strict
 -- (©) Copyright 2025 Meta Games, LLC. All rights reserved.
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 
@@ -57,7 +58,17 @@ export type ServerNetworking = {
 
 local ServerNetworking = Class("ServerNetworking"):Extend(SharedNetworkingModule)
 
-function ServerNetworking:new(
+--[[
+	Registers a new remote event on the server.
+	Automatically replicates event creation to all connected clients.
+	
+	@param RemoteName - Unique name for the remote event
+	@param Reliable - Whether to use reliable transmission (default: true). Can also pass a ServerEventConfig table
+	@param TwoWay - Whether this is a request/response event (default: false). TwoWay events must be reliable
+	@param callback - Optional callback function to connect immediately
+	@return Connection object if callback provided, otherwise nil
+]]
+function ServerNetworking:New(
 	RemoteName: string,
 	Reliable: boolean | ServerEventConfig | nil,
 	TwoWay: boolean?,
@@ -118,30 +129,64 @@ function ServerNetworking:new(
 	end
 end
 
-ServerNetworking.New = ServerNetworking.new
+ServerNetworking.new = ServerNetworking.New
 
 -- :new() Wrappers --
+--[[
+	Convenience method to register a reliable, one-way remote event.
+	
+	@param RemoteName - Unique name for the remote event
+	@param callback - Optional callback function to connect immediately
+	@return Connection object if callback provided, otherwise nil
+]]
 function ServerNetworking:Reliable(RemoteName: string, callback: ((...any) -> ())?)
 	return self:new(RemoteName, true, false, callback)
 end
+ServerNetworking.reliable = ServerNetworking.Reliable
 
+--[[
+	Convenience method to register a reliable, two-way (request/response) remote event.
+	
+	@param RemoteName - Unique name for the remote event
+	@param callback - Optional callback function to connect immediately
+	@return Connection object if callback provided, otherwise nil
+]]
 function ServerNetworking:TwoWay(RemoteName: string, callback: ((...any) -> ())?)
 	return self:new(RemoteName, true, true, callback)
 end
+ServerNetworking.twoWay = ServerNetworking.TwoWay
 
+--[[
+	Convenience method to register an unreliable, one-way remote event.
+	Unreliable events have lower latency but may be dropped under poor network conditions.
+	
+	@param RemoteName - Unique name for the remote event
+	@param callback - Optional callback function to connect immediately
+	@return Connection object if callback provided, otherwise nil
+]]
 function ServerNetworking:Unreliable(RemoteName: string, callback: ((...any) -> ())?)
 	return self:new(RemoteName, false, false, callback)
 end
+ServerNetworking.unreliable = ServerNetworking.Unreliable
 
 --[[
 	Destroys a remote event and replicates to clients.
 	Clears all callbacks and removes the event from the Events table.
+	For BindableEvents/Functions, destroys the Roblox instance.
 	
 	@param RemoteName - The name of the remote to destroy
 ]]
-function ServerNetworking:destroy(RemoteName: string)
+function ServerNetworking:Destroy(RemoteName: string)
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	RemoteName = self:SanitizeRemoteName(RemoteName)
+
+	-- Handle bindables
+	if self.Bindables and self.Bindables[RemoteName] then
+		local instance = self.Bindables[RemoteName]
+		self.Bindables[RemoteName] = nil
+		instance:Destroy()
+		return
+	end
 
 	if self.Events[RemoteName] == nil then
 		warn("[KnightRemotes]: ", "RemoteName '" .. RemoteName .. "' does not exist.")
@@ -161,15 +206,43 @@ function ServerNetworking:destroy(RemoteName: string)
 		self._Replication:FireAllClients(2, RemoteName)
 	end
 end
-ServerNetworking.Destroy = ServerNetworking.destroy
+ServerNetworking.destroy = ServerNetworking.Destroy
 
--- > Backward compatibility with old networking
-function ServerNetworking:register(RemoteName: string, Type: string, Callback: (...any) -> ()?)
+--[[
+	Deprecated backward compatibility method for registering events.
+	Supports legacy event types including BindableEvent and BindableFunction.
+	
+	@deprecated Use :new(), :Reliable(), :TwoWay(), or :Unreliable() instead
+	@param RemoteName - Unique name for the event
+	@param Type - Event type: "RemoteEvent", "UnreliableRemoteEvent", "RemoteFunction", "BindableEvent", "BindableFunction"
+	@param Callback - Optional callback function to connect immediately
+	@return Connection object if callback provided, otherwise nil
+]]
+function ServerNetworking:Register(RemoteName: string, Type: string, Callback: (...any) -> ()?)
 	RemoteName = self:SanitizeRemoteName(RemoteName)
-	warn("[KnightRemotes]: ", "ServerNetworking:Register(Name, Type, Callback) is deprecated.", debug.traceback())
 
+	if not self.silenceDeprecationWarnings then
+		warn("[KnightRemotes]: ", "ServerNetworking:Register(Name, Type, Callback) is deprecated.", debug.traceback())
+	end
+
+	-- Handle BindableEvent and BindableFunction
 	if table.find({ "BindableEvent", "BindableFunction" }, Type) then
-		error(Type .. " are no longer supported within KnightRemotes.")
+		-- Initialize Bindables table if it doesn't exist
+		if not self.Bindables then
+			self.Bindables = {}
+		end
+
+		-- Create the Roblox instance
+		local instance = Instance.new(Type)
+		instance.Name = RemoteName
+		self.Bindables[RemoteName] = instance
+
+		-- Connect callback if provided
+		if Callback then
+			return self:Connect(RemoteName, Callback)
+		end
+
+		return
 	end
 
 	local isUnreliable = Type == "UnreliableRemoteEvent"
@@ -181,9 +254,69 @@ function ServerNetworking:register(RemoteName: string, Type: string, Callback: (
 		return self:Connect(RemoteName, Callback)
 	end
 end
-ServerNetworking.Register = ServerNetworking.register
+ServerNetworking.register = ServerNetworking.Register
+
+--[[
+	Fires a remote event to all connected players that pass the filter function.
+	
+	@param RemoteName - The name of the remote event
+	@param Filter - A function that takes a Player and returns true to send the event, false to skip
+	@param ... - Additional arguments to send with the event
+]]
+function ServerNetworking:FireAllFilter(RemoteName: string, Filter: (player: Player) -> boolean, ...)
+	for _, player: Player in pairs(Players:GetPlayers()) do
+		if Filter(player) then
+			self:Fire(RemoteName, player, ...)
+		end
+	end
+end
+ServerNetworking.fireAllFilter = ServerNetworking.FireAllFilter
+
+--[[
+	Fires a remote event to all connected players within a certain distance from a position.
+	
+	@param RemoteName - The name of the remote event
+	@param Position - The center position to measure distance from
+	@param MaxDistance - The maximum distance from the position to send the event
+	@param ... - Additional arguments to send with the event
+]]
+function ServerNetworking:FireAllNearby(RemoteName: string, Position: Vector3, MaxDistance: number, ...)
+	return self:FireAllFilter(RemoteName, function(player: Player)
+		return player:DistanceFromCharacter(Position) <= MaxDistance
+	end, ...)
+end
+ServerNetworking.fireAllNearby = ServerNetworking.FireAllNearby
+
+--[[
+	Fires a remote event to all connected players except those specified.
+	
+	@param RemoteName - The name of the remote event
+	@param Except - A Player or array of Players to exclude from receiving the event
+	@param ... - Additional arguments to send with the event
+]]
+function ServerNetworking:FireAllExcept(RemoteName: string, Except: Player | { Player }, ...)
+	return self:FireAllFilter(RemoteName, function(player: Player)
+		if typeof(Except) == "table" then
+			return not table.find(Except :: { Player }, player)
+		end
+
+		return player ~= (Except :: Player)
+	end, ...)
+end
+ServerNetworking.fireAllExcept = ServerNetworking.FireAllExcept
 
 -- Internal --
+--[[
+	Internal method to write a packet to the buffer for a specific player.
+	Handles serialization of event ID, packet type, and arguments.
+	
+	@private
+	@param id - The remote event identifier
+	@param Reliable - Whether to use reliable transmission
+	@param Player - Target player (nil for broadcast)
+	@param packetType - Type of packet (EVENT, REQUEST, or RESPONSE)
+	@param ... - Arguments to serialize into the packet
+]]
 function ServerNetworking:_sendPacket(id: string, Reliable: boolean, Player: Player?, packetType: number, ...: any)
 	local write = self:_Writer(Reliable, Player)
 	self.Buffers.WriteString(write, id)
@@ -196,6 +329,16 @@ function ServerNetworking:_sendPacket(id: string, Reliable: boolean, Player: Pla
 	end
 end
 
+--[[
+	Internal method to dispatch received packets to registered callbacks.
+	Runs middleware, validates events, and handles EVENT/REQUEST/RESPONSE packet types.
+	
+	@private
+	@param player - The player who sent the packet
+	@param id - The remote event identifier
+	@param args - Array of deserialized arguments (first element is packet type)
+	@param argCount - Number of arguments in the array
+]]
 function ServerNetworking:_dispatch(player: Player, id: string, args: { any }, argCount: number)
 	if self.Events[id] == nil then
 		warn("[KnightRemotes]: ", `{player.Name} is attempting to call an unregistered event '{id}'. Dropping packet.`)
@@ -281,6 +424,15 @@ function ServerNetworking:_dispatch(player: Player, id: string, args: { any }, a
 	end
 end
 
+--[[
+	Internal method to handle incoming network packets from a player.
+	Deserializes the buffer and dispatches each event to _dispatch.
+	
+	@private
+	@param player - The player who sent the packet
+	@param buffer - The raw buffer data
+	@param instance - Array of instance references for deserialization
+]]
 function ServerNetworking:_handleEvent(player: Player, buffer, instance: { Instance })
 	local reader = self.Buffers.CreateReader(buffer, instance)
 
@@ -300,6 +452,14 @@ function ServerNetworking:_handleEvent(player: Player, buffer, instance: { Insta
 	self.Buffers.FreeReader(reader)
 end
 
+--[[
+	Internal method to immediately flush buffered packets to player(s).
+	Used for time-sensitive operations like TwoWay requests.
+	
+	@private
+	@param reliable - Whether to flush reliable or unreliable buffer
+	@param player - Target player to flush (nil for broadcast flush)
+]]
 function ServerNetworking:_flushImmediate(reliable: boolean, player: Player?)
 	if player then
 		-- Flush for specific player
@@ -332,6 +492,12 @@ function ServerNetworking:_flushImmediate(reliable: boolean, player: Player?)
 	end
 end
 
+--[[
+	Internal method to flush all buffered packets on the next frame.
+	Called automatically by the Heartbeat loop to batch network operations.
+	
+	@private
+]]
 function ServerNetworking:_flush()
 	if self.BroadcastReliable then
 		local writer = self.BroadcastReliable

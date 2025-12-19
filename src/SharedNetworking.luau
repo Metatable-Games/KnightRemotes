@@ -43,10 +43,33 @@ SharedNetworking.Events = {}
 SharedNetworking.Middleware = {}
 SharedNetworking.Buffers = require("./Buffers")
 SharedNetworking.Standalone = true
+SharedNetworking.silenceDeprecationWarnings = false
 
+-- Helper function to wait for event replication on client (with timeout)
+local function waitForEventReplication(self: any, RemoteName: string): EventInfo?
+	if not RunService:IsClient() then
+		return self.Events[RemoteName]
+	end
+
+	local startTime = os.clock()
+	while not self.Events[RemoteName] and (os.clock() - startTime) < REPLICATION_TIMEOUT do
+		task.wait(0.05) -- Check every 50ms
+	end
+
+	return self.Events[RemoteName]
+end
+
+--[[
+	Sanitizes a remote name by replacing invalid characters.
+	Converts ':' to '_' to ensure compatibility with Roblox naming conventions.
+	
+	@param name - The remote name to sanitize
+	@return The sanitized remote name
+]]
 function SharedNetworking:SanitizeRemoteName(name: string): string
 	return name:gsub(":", "_")
 end
+SharedNetworking.sanitizeRemoteName = SharedNetworking.SanitizeRemoteName
 
 --[[
 	Adds middleware to the networking layer.
@@ -70,11 +93,27 @@ function SharedNetworking:UseMiddleware(middleware: (Player?, string, { any }) -
 		end,
 	}
 end
+SharedNetworking.useMiddleware = SharedNetworking.UseMiddleware
 
+--[[
+	Disconnects a specific callback from a remote event.
+	Removes the callback with the given ConnectionId from the event's callback list.
+	Note: For BindableEvents/Functions, the connection is managed by Roblox directly.
+	
+	@param RemoteName - The name of the remote event
+	@param ConnectionId - The unique identifier for the callback connection
+]]
 function SharedNetworking:Disconnect(RemoteName: string, ConnectionId: string)
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	assert(type(ConnectionId) == "string", "id must be a string.")
 	RemoteName = self:SanitizeRemoteName(RemoteName)
+
+	-- Bindables are managed by Roblox Connection objects directly
+	if self.Bindables and self.Bindables[RemoteName] then
+		warn("[KnightRemotes]: ", "Bindable connections are managed by Roblox. Call :Disconnect() on the Connection object returned from :Connect().")
+		return
+	end
+
 	assert(self.Events[RemoteName] ~= nil, "RemoteName '" .. RemoteName .. "' is not registered.")
 
 	if self.Events[RemoteName].Callbacks[ConnectionId] == nil then
@@ -84,27 +123,29 @@ function SharedNetworking:Disconnect(RemoteName: string, ConnectionId: string)
 
 	self.Events[RemoteName].Callbacks[ConnectionId] = nil
 end
+SharedNetworking.disconnect = SharedNetworking.Disconnect
 
--- Helper function to wait for event replication on client (with timeout)
-local function waitForEventReplication(self: any, RemoteName: string): EventInfo?
-	if not RunService:IsClient() then
-		return self.Events[RemoteName]
-	end
-
-	local startTime = os.clock()
-	while not self.Events[RemoteName] and (os.clock() - startTime) < REPLICATION_TIMEOUT do
-		task.wait(0.05) -- Check every 50ms
-	end
-
-	return self.Events[RemoteName]
-end
-
+--[[
+	Checks if a remote event is registered.
+	On the client, can optionally yield until the event is replicated from the server.
+	Also checks for registered BindableEvents and BindableFunctions.
+	
+	@param RemoteName - The name of the remote event to check
+	@param yield - (Optional) If true and on client, waits for event replication before checking
+	@return True if the event is registered, false otherwise
+]]
 function SharedNetworking:IsRegistered(RemoteName: string, yield: boolean?): boolean
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	if yield == nil then
 		yield = false
 	end
 	RemoteName = self:SanitizeRemoteName(RemoteName)
+	
+	-- Check if it's a bindable
+	if self.Bindables and self.Bindables[RemoteName] then
+		return true
+	end
+	
 	if yield and RunService:IsClient() then
 		waitForEventReplication(self, RemoteName)
 	end
@@ -112,10 +153,33 @@ function SharedNetworking:IsRegistered(RemoteName: string, yield: boolean?): boo
 end
 SharedNetworking.isRegistered = SharedNetworking.IsRegistered
 
+--[[
+	Connects a callback function to a remote event.
+	For BindableEvents/Functions, connects directly to the Roblox instance.
+	For network events, registers the callback to receive incoming packets.
+	On client, automatically waits for event replication if needed.
+	
+	@param RemoteName - The name of the remote event to connect to
+	@param Callback - The function to call when the event fires
+	@return A Connection object with a Disconnect method
+]]
 function SharedNetworking:Connect(RemoteName: string, Callback: (...any) -> ()?)
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	assert(type(Callback) == "function", "Callback must be a function.")
 	RemoteName = self:SanitizeRemoteName(RemoteName)
+
+	-- > Handle bindables
+	if self.Bindables and self.Bindables[RemoteName] then
+		local instance = self.Bindables[RemoteName]
+
+		if instance:IsA("BindableEvent") then
+			return instance.Event:Connect(Callback)
+		elseif instance:IsA("BindableFunction") then
+			instance.OnInvoke = Callback
+		else
+			error("Instance bound to " .. RemoteName .. " is not a BindableEvent or BindableFunction.")
+		end
+	end
 
 	local Event = self.Events[RemoteName]
 
@@ -160,10 +224,43 @@ function SharedNetworking:Connect(RemoteName: string, Callback: (...any) -> ()?)
 		end,
 	}
 end
+SharedNetworking.connect = SharedNetworking.Connect
 
+--[[
+	Fires a remote event to send data across the network.
+	
+	Server usage: Fire(RemoteName, Player, ...args)
+	  - First argument must be the target Player
+	  - Remaining arguments are sent to the client
+	
+	Client usage: Fire(RemoteName, ...args)
+	  - All arguments are sent to the server
+	
+	For TwoWay events, this method yields until a response is received.
+	For BindableEvents, fires the event. For BindableFunctions, invokes and returns the result.
+	Automatically handles reliable/unreliable transmission and request/response flow.
+	
+	@param RemoteName - The name of the remote event to fire
+	@param ... - Arguments to send (on server, first arg must be Player for network events)
+	@return For TwoWay events, returns the response values from the remote callback
+]]
 function SharedNetworking:Fire(RemoteName: string, ...)
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	RemoteName = self:SanitizeRemoteName(RemoteName)
+
+	-- Handle bindables
+	if self.Bindables and self.Bindables[RemoteName] then
+		local instance = self.Bindables[RemoteName]
+		
+		if instance:IsA("BindableEvent") then
+			instance:Fire(...)
+			return
+		elseif instance:IsA("BindableFunction") then
+			return instance:Invoke(...)
+		else
+			error("Instance bound to " .. RemoteName .. " is not a BindableEvent or BindableFunction.")
+		end
+	end
 
 	local args = { ... }
 	local Event = self.Events[RemoteName]
@@ -273,11 +370,25 @@ function SharedNetworking:Fire(RemoteName: string, ...)
 		end
 	end
 end
+SharedNetworking.fire = SharedNetworking.Fire
 
+--[[
+	Fires a remote event to all connected players.
+	Can only be called from the server. Does not support TwoWay events or Bindables.
+	
+	@param RemoteName - The name of the remote event to fire
+	@param ... - Arguments to send to all clients
+]]
 function SharedNetworking:FireAll(RemoteName: string, ...)
 	assert(RunService:IsServer(), "FireAll can only be called from the server.")
 	assert(type(RemoteName) == "string", "RemoteName must be a string.")
 	RemoteName = self:SanitizeRemoteName(RemoteName)
+
+	-- Bindables don't support FireAll (they're local only)
+	if self.Bindables and self.Bindables[RemoteName] then
+		warn("[KnightRemotes]: ", "FireAll is not supported for BindableEvents/Functions. Use :Fire() instead.")
+		return
+	end
 
 	if not self.Events[RemoteName] then
 		warn("[KnightRemotes]: ", "RemoteName '" .. RemoteName .. "' is not registered.")
@@ -296,15 +407,24 @@ function SharedNetworking:FireAll(RemoteName: string, ...)
 		self:Fire(RemoteName, player, ...)
 	end
 end
+SharedNetworking.fireAll = SharedNetworking.FireAll
 
--- Aliases
+-- Aliases --
 SharedNetworking.FireAllClients = SharedNetworking.FireAll
 SharedNetworking.FireClient = SharedNetworking.Fire
 SharedNetworking.FireServer = SharedNetworking.Fire
 
+SharedNetworking.fireAllClients = SharedNetworking.FireAll
+SharedNetworking.fireClient = SharedNetworking.Fire
+SharedNetworking.fireServer = SharedNetworking.Fire
+
 SharedNetworking.InvokeClient = SharedNetworking.Fire
 SharedNetworking.InvokeServer = SharedNetworking.Fire
 SharedNetworking.Invoke = SharedNetworking.Fire
+
+SharedNetworking.invokeClient = SharedNetworking.Fire
+SharedNetworking.invokeServer = SharedNetworking.Fire
+SharedNetworking.invoke = SharedNetworking.Fire
 
 -- Internal --
 SharedNetworking.PacketTypes = {
